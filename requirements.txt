@@ -1,0 +1,7 @@
+pandasai==1.2.3
+bs4
+pandas
+streamlit
+langchain_experimental
+openpyxl
+tabulate
