@@ -1,4 +1,3 @@
-
 # from langchain.llms import OpenAI
 from pandasai import SmartDataframe
 from pandasai.llm import OpenAI
@@ -10,11 +9,8 @@ import os
 
 from langchain.agents import AgentType
 from langchain_experimental.agents import create_pandas_dataframe_agent
-# from langchain_experimental.agents import create_pandas_dataframe_agent
 from langchain.callbacks.streamlit import StreamlitCallbackHandler
 from langchain.chat_models import ChatOpenAI
-# from pandasai_app.components.faq import faq
-
 
 file_formats = {
     "csv": pd.read_csv,
@@ -28,13 +24,11 @@ def clear_submit():
     """
     Clear the Submit Button State
     Returns:
-
     """
     st.session_state["submit"] = False
 
-
-@st.cache_data(ttl="2h")
-def load_data(uploaded_file):
+# Function to process a single uploaded file
+def process_uploaded_file(uploaded_file):
     try:
         ext = os.path.splitext(uploaded_file.name)[1][1:].lower()
     except:
@@ -45,82 +39,79 @@ def load_data(uploaded_file):
         st.error(f"Unsupported file format: {ext}")
         return None
 
-
 st.set_page_config(page_title="Chat-Data", page_icon="🦜|🐼")
 st.title("Q&A with Data with AI 🐼")
 
-uploaded_file = st.file_uploader(
-    "Upload a Data file",
+# Prompt user for OpenAI API key
+openai_api_key = st.sidebar.text_input("OpenAI API Key",
+                                       type="password",
+                                       placeholder="Paste your OpenAI API key here (sk-...)")
+
+if not openai_api_key:
+    st.info("Please add your OpenAI API key to continue.")
+    st.stop()
+
+# Use file_uploader in a loop to handle multiple files
+uploaded_files = st.file_uploader(
+    label="Upload Data files",
     type=list(file_formats.keys()),
+    accept_multiple_files=True,
     help="Various File formats are Support",
     on_change=clear_submit,
 )
 
-if uploaded_file:
-    df = load_data(uploaded_file)
-
-openai_api_key = st.sidebar.text_input("OpenAI API Key",
-                                        type="password",
-                                        placeholder="Paste your OpenAI API key here (sk-...)")
+# Check if there are uploaded files before processing
+if uploaded_files:
+    # Combine uploaded files into one vector (concatenate along axis 0)
+    combined_df = pd.concat([process_uploaded_file(file) for file in uploaded_files], axis=0, ignore_index=True)
+else:
+    combined_df = pd.DataFrame()  # Create an empty dataframe
 
 chat_data = st.sidebar.selectbox("Choose a Backend", ['langchain', 'pandasai'])
 
-with st.sidebar:
-        st.markdown("---")
-        st.markdown(
-            "## How to use\n"
-            "1. Enter your [OpenAI API key](https://platform.openai.com/account/api-keys) below🔑\n"  # noqa: E501
-            "2. Choose Backend PandasAI or LangChain\n"
-            "3. Upload the file with data📄\n"
-            "4. Ask a question about to make dataframe conversational💬\n"
-        )
+# Process combined dataframe only if there are files uploaded
+if not combined_df.empty:
+    if "messages" not in st.session_state or st.sidebar.button("Clear conversation history"):
+        st.session_state["messages"] = [{"role": "assistant", "content": "How can I help you?"}]
 
-        st.markdown("---")
+    for msg in st.session_state.messages:
+        st.chat_message(msg["role"]).write(msg["content"])
 
-if "messages" not in st.session_state or st.sidebar.button("Clear conversation history"):
-    st.session_state["messages"] = [{"role": "assistant", "content": "How can I help you?"}]
+    if prompt := st.chat_input(placeholder="What is this data about?"):
+        st.session_state.messages.append({"role": "user", "content": prompt})
+        st.chat_message("user").write(prompt)
 
-for msg in st.session_state.messages:
-    st.chat_message(msg["role"]).write(msg["content"])
+        if chat_data == "pandasai":
+            # PandasAI OpenAI Model
+            llm = OpenAI(api_token=openai_api_key)
 
-if prompt := st.chat_input(placeholder="What is this data about?"):
-    st.session_state.messages.append({"role": "user", "content": prompt})
-    st.chat_message("user").write(prompt)
+            sdf = SmartDataframe(combined_df, config={"llm": llm,
+                                                      "enable_cache": False,
+                                                      "conversational": True,
+                                                      "callback": StdoutCallback()})
 
-    if not openai_api_key:
-        st.info("Please add your OpenAI API key to continue.")
-        st.stop()
-    if chat_data == "pandasai":
-        #PandasAI OpenAI Model
-        llm = OpenAI(api_token=openai_api_key)
-        # llm = OpenAI(api_token=openai_api_key)
+            with st.chat_message("assistant"):
+                response = sdf.chat(st.session_state.messages)
+                st.session_state.messages.append({"role": "assistant", "content": response})
+                st.write(response)
 
-        sdf = SmartDataframe(df, config = {"llm": llm,
-                                            "enable_cache": False,
-                                            "conversational": True,
-                                            "callback": StdoutCallback()})
+        if chat_data == "langchain":
+            llm = ChatOpenAI(
+                temperature=0, model="gpt-3.5-turbo-1106", openai_api_key=openai_api_key, streaming=True
+            )
 
-        with st.chat_message("assistant"):
-            response = sdf.chat(st.session_state.messages)
-            st.session_state.messages.append({"role": "assistant", "content": response})
-            st.write(response)
-    
-    if chat_data == "langchain":
+            pandas_df_agent = create_pandas_dataframe_agent(
+                llm,
+                combined_df,
+                verbose=True,
+                agent_type=AgentType.OPENAI_FUNCTIONS,
+                handle_parsing_errors=True,
+            )
 
-        llm = ChatOpenAI(
-            temperature=0, model="gpt-3.5-turbo-1106", openai_api_key=openai_api_key, streaming=True
-        )
-
-        pandas_df_agent = create_pandas_dataframe_agent(
-            llm,
-            df,
-            verbose=True,
-            agent_type=AgentType.OPENAI_FUNCTIONS,
-            handle_parsing_errors=True,
-        )
-
-        with st.chat_message("assistant"):
-            st_cb = StreamlitCallbackHandler(st.container(), expand_new_thoughts=False)
-            response = pandas_df_agent.run(st.session_state.messages, callbacks=[st_cb])
-            st.session_state.messages.append({"role": "assistant", "content": response})
-            st.write(response)
+            with st.chat_message("assistant"):
+                st_cb = StreamlitCallbackHandler(st.container(), expand_new_thoughts=False)
+                response = pandas_df_agent.run(st.session_state.messages, callbacks=[st_cb])
+                st.session_state.messages.append({"role": "assistant", "content": response})
+                st.write(response)
+else:
+    st.warning("No files uploaded. Please upload data files to continue.")
